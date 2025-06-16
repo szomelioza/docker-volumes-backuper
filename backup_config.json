@@ -1,0 +1,11 @@
+{
+	"targets": [
+		{
+			"host": "local",
+			"volume": "my_volume"
+		}
+	],
+	"storage": {
+		"path": "/tmp"
+	}
+}
