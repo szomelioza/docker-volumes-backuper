@@ -43,6 +43,9 @@ fi
 
 echo "Backuper started"
 
+BACKUP_PATH=$(jq -r '.storage.path' "$CONFIG_PATH" | xargs realpath)
+echo "Backup path: $BACKUP_PATH"
+
 # Loop over targets from config
 jq -c '.targets[]' "$CONFIG_PATH" | while read -r target; do
 	# Parse config values
@@ -66,7 +69,7 @@ jq -c '.targets[]' "$CONFIG_PATH" | while read -r target; do
 		# Backup volume
 		docker run --rm \
 			-v "$volume":/volume \
-			-v "/tmp:/backup" \
+			-v "$BACKUP_PATH:/backup" \
 			alpine:latest \
 			tar czf /backup/$volume-backup.tar.gz -C /volume .
 
