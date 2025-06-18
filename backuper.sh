@@ -2,6 +2,38 @@
 
 CONFIG_PATH=""
 
+backup_volume() {
+	local volume="$1"
+	local backup_path="$2"
+	local host="$3"
+
+	# Check if volume exists
+	if ! docker volume inspect "$volume" >/dev/null 2>&1; then
+		echo "ERROR: Volume: $volume on host: $host doesn't exist!"
+		exit 1			
+	fi
+
+	# Get containers that are using the volume
+	readarray -t VOLUME_CONTAINERS < <(docker ps -a --filter volume="$volume" --format '{{.ID}}')
+
+	# Stop containers
+	for container_id in "${VOLUME_CONTAINERS[@]}"; do
+		docker stop "$container_id"
+	done
+
+	# Backup volume
+	docker run --rm \
+		-v "$volume":/volume \
+		-v "$backup_path:/backup" \
+		alpine:latest \
+		tar czf /backup/$volume-backup.tar.gz -C /volume .
+
+	# Start containers
+	for container_id in "${VOLUME_CONTAINERS[@]}"; do
+		docker start "$container_id"
+	done
+}
+
 # Read args
 while [[ "$#" -gt 0 ]]; do
 	case "$1" in
@@ -52,31 +84,11 @@ jq -c '.targets[]' "$CONFIG_PATH" | while read -r target; do
 	eval "$(echo "$target" | jq -r 'to_entries[] | "\(.key)=\(.value|@sh)"')"
 	
 	if [[ "$host" = "local" ]]; then
-		# Check if volume exists
-		if ! docker volume inspect "$volume" >/dev/null 2>&1; then
-			echo "ERROR: Volume: $volume on host: $host doesn't exist!"
-			exit 1			
-		fi
-
-		# Get containers that are using the volume
-		readarray -t VOLUME_CONTAINERS < <(docker ps -a --filter volume="$volume" --format '{{.ID}}')
-
-		# Stop containers
-		for container_id in "${VOLUME_CONTAINERS[@]}"; do
-			docker stop "$container_id"
-		done
-
-		# Backup volume
-		docker run --rm \
-			-v "$volume":/volume \
-			-v "$BACKUP_PATH:/backup" \
-			alpine:latest \
-			tar czf /backup/$volume-backup.tar.gz -C /volume .
-
-		# Start containers
-		for container_id in "${VOLUME_CONTAINERS[@]}"; do
-			docker start "$container_id"
-		done
+		backup_volume "$volume" "$BACKUP_PATH" "$host"
+	else
+		ssh -i $ssh_key_path "$user@$host" \
+			"$(declare -f backup_volume); backup_volume \"$volume\" \"/tmp\" \"$host\""
+		scp -i "$ssh_key_path" "$user@$host:/tmp/$volume-backup.tar.gz" "$BACKUP_PATH/"
 	fi
 
 done
