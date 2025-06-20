@@ -4,8 +4,7 @@ CONFIG_PATH=""
 
 backup_volume() {
 	local volume="$1"
-	local backup_path="$2"
-	local host="$3"
+	local host="$2"
 
 	# Check if volume exists
 	if ! docker volume inspect "$volume" >/dev/null 2>&1; then
@@ -18,19 +17,18 @@ backup_volume() {
 
 	# Stop containers
 	for container_id in "${VOLUME_CONTAINERS[@]}"; do
-		docker stop "$container_id"
+		docker stop "$container_id" > /dev/null
 	done
 
 	# Backup volume
 	docker run --rm \
 		-v "$volume":/volume \
-		-v "$backup_path:/backup" \
+		-v "/tmp:/backup" \
 		alpine:latest \
-		tar czf /backup/$volume-backup.tar.gz -C /volume .
-
+  	sh -c "tar czf /backup/$volume-backup.tar.gz -C /volume . && chown $(id -u):$(id -g) /backup/$volume-backup.tar.gz"
 	# Start containers
 	for container_id in "${VOLUME_CONTAINERS[@]}"; do
-		docker start "$container_id"
+		docker start "$container_id" > /dev/null
 	done
 }
 
@@ -75,8 +73,18 @@ fi
 
 echo "Backuper started"
 
-BACKUP_PATH=$(jq -r '.storage.path' "$CONFIG_PATH" | xargs realpath)
-echo "Backup path: $BACKUP_PATH"
+# Read backup storage config
+BACKUP_PATH=$(jq -r '.storage.path' "$CONFIG_PATH" | xargs)
+BACKUP_HOST=$(jq -r '.storage.host // empty' "$CONFIG_PATH" | xargs)
+BACKUP_USER=$(jq -r '.storage.user // empty' "$CONFIG_PATH" | xargs)
+BACKUP_SSH_KEY_PATH=$(jq -r '.storage.ssh_key_path // empty' "$CONFIG_PATH" | xargs)
+
+# Check if local backup or remote
+if [[ -z "$BACKUP_HOST" || -z "$BACKUP_USER" || -z "$BACKUP_SSH_KEY_PATH" ]]; then
+	LOCAL_BACKUP=1
+else
+	LOCAL_BACKUP=0
+fi
 
 # Loop over targets from config
 jq -c '.targets[]' "$CONFIG_PATH" | while read -r target; do
@@ -84,11 +92,19 @@ jq -c '.targets[]' "$CONFIG_PATH" | while read -r target; do
 	eval "$(echo "$target" | jq -r 'to_entries[] | "\(.key)=\(.value|@sh)"')"
 	
 	if [[ "$host" = "local" ]]; then
-		backup_volume "$volume" "$BACKUP_PATH" "$host"
+		backup_volume "$volume" "$host"
 	else
 		ssh -i $ssh_key_path "$user@$host" \
-			"$(declare -f backup_volume); backup_volume \"$volume\" \"/tmp\" \"$host\""
-		scp -i "$ssh_key_path" "$user@$host:/tmp/$volume-backup.tar.gz" "$BACKUP_PATH/"
+			"$(declare -f backup_volume); backup_volume \"$volume\" \"$host\""
+		scp -i "$ssh_key_path" "$user@$host:/tmp/$volume-backup.tar.gz" "/tmp"
+	fi
+
+	if [[ "$LOCAL_BACKUP" -eq 0 ]]; then
+		# Upload to remote backup
+		scp -O -i "$BACKUP_SSH_KEY_PATH" "/tmp/$volume-backup.tar.gz" "$BACKUP_USER@$BACKUP_HOST:$BACKUP_PATH"
+	else
+		# Move to local backup
+		mv "/tmp/$volume-backup.tar.gz" "$BACKUP_PATH"
 	fi
 
 done
